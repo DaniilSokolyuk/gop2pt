@@ -1,17 +1,20 @@
 package webtorrent
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/DaniilSokolyuk/gop2pt"
+	"github.com/DaniilSokolyuk/gop2pt/log"
+	"github.com/DaniilSokolyuk/gop2pt/utils"
+
 	"github.com/gorilla/websocket"
 	"github.com/pion/datachannel"
 	"github.com/pion/webrtc/v3"
 )
+
+const offerTimeOut = time.Second * 30
 
 type TrackerClientStats struct {
 	Dials                  int64
@@ -21,11 +24,12 @@ type TrackerClientStats struct {
 
 // Client represents the webtorrent client
 type TrackerClient struct {
+	NumWant  int
 	Url      string
-	PeerId   [20]byte
-	InfoHash [20]byte
+	PeerId   string
+	InfoHash string
 	OnConn   onDataChannelOpen
-	Logger   gop2pt.Logger
+	Logger   log.Logger
 	Dialer   *websocket.Dialer
 
 	mu             sync.Mutex
@@ -37,18 +41,10 @@ type TrackerClient struct {
 	pingTicker     *time.Ticker
 }
 
-func (me *TrackerClient) Stats() TrackerClientStats {
-	me.mu.Lock()
-	defer me.mu.Unlock()
-	return me.stats
-}
-
-func (me *TrackerClient) peerIdBinary() string {
-	return binaryToJsonString(me.PeerId[:])
-}
-
-func (me *TrackerClient) infoHashBinary() string {
-	return binaryToJsonString(me.InfoHash[:])
+func (tc *TrackerClient) Stats() TrackerClientStats {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.stats
 }
 
 // outboundOffer represents an outstanding offer.
@@ -56,7 +52,7 @@ type outboundOffer struct {
 	originalOffer  webrtc.SessionDescription
 	peerConnection *wrappedPeerConnection
 	dataChannel    *webrtc.DataChannel
-	infoHash       [20]byte
+	timeout        *time.Timer
 }
 
 type DataChannelContext struct {
@@ -90,7 +86,6 @@ func (tc *TrackerClient) doWebsocket() error {
 	tc.wsConn = c
 	tc.cond.Broadcast()
 	tc.mu.Unlock()
-	tc.announceOffers()
 	closeChan := make(chan struct{})
 	go func() {
 		for {
@@ -122,6 +117,7 @@ func (tc *TrackerClient) doWebsocket() error {
 func (tc *TrackerClient) Start(onStop func(error)) {
 	tc.pingTicker = time.NewTicker(60 * time.Second)
 	tc.cond.L = &tc.mu
+	tc.outboundOffers = make(map[string]outboundOffer, 0)
 	go func() {
 		onStop(tc.run())
 	}()
@@ -155,29 +151,6 @@ func (tc *TrackerClient) Close() error {
 	return nil
 }
 
-func (tc *TrackerClient) announceOffers() {
-	// tc.Announce grabs a lock on tc.outboundOffers. It also handles the case where outboundOffers
-	// is nil. Take ownership of outboundOffers here.
-	tc.mu.Lock()
-	offers := tc.outboundOffers
-	tc.outboundOffers = nil
-	tc.mu.Unlock()
-
-	if offers == nil {
-		return
-	}
-
-	// Iterate over our locally-owned offers, close any existing "invalid" ones from before the
-	// socket reconnected, reannounce the infohash, adding it back into the tc.outboundOffers.
-	tc.Logger.Error("reannouncing %d infohashes after restart", len(offers))
-	for _, offer := range offers {
-		// TODO: Capture the errors? Are we even in a position to do anything with them?
-		offer.peerConnection.Close()
-		// Use goroutine here to allow read loop to start and ensure the buffer drains.
-		go tc.Announce()
-	}
-}
-
 func (tc *TrackerClient) closeUnusedOffers() {
 	for _, offer := range tc.outboundOffers {
 		offer.peerConnection.Close()
@@ -187,54 +160,58 @@ func (tc *TrackerClient) closeUnusedOffers() {
 
 func (tc *TrackerClient) Announce() error {
 	metrics.Add("outbound announces", 1)
-	var randOfferId [20]byte
-	_, err := rand.Read(randOfferId[:])
-	if err != nil {
-		return fmt.Errorf("generating offer_id bytes: %w", err)
-	}
-	offerIDBinary := binaryToJsonString(randOfferId[:])
 
-	pc, dc, offer, err := newOffer()
-	if err != nil {
-		return fmt.Errorf("creating offer: %w", err)
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	offers := make([]Offer, tc.NumWant)
+	for i := 0; i < tc.NumWant; i++ {
+		offerIDBinary := utils.MakePeerID()
+
+		pc, dc, offer, err := newOffer()
+		if err != nil {
+			return fmt.Errorf("creating offer: %w", err)
+		}
+
+		tc.outboundOffers[offerIDBinary] = outboundOffer{
+			peerConnection: pc,
+			dataChannel:    dc,
+			originalOffer:  offer,
+			timeout: time.AfterFunc(offerTimeOut, func() {
+				tc.mu.Lock()
+				defer tc.mu.Unlock()
+				pc.Close()
+				delete(tc.outboundOffers, offerIDBinary)
+			}),
+		}
+
+		offers[i] = Offer{
+			OfferID: offerIDBinary,
+			Offer:   offer,
+		}
 	}
 
 	req := AnnounceRequest{
-		Numwant:    1, // If higher we need to create equal amount of offers.
+		Numwant:    tc.NumWant,
 		Uploaded:   0,
 		Downloaded: 0,
 		Left:       -1,
 		Action:     "announce",
-		InfoHash:   tc.infoHashBinary(),
-		PeerID:     tc.peerIdBinary(),
-		Offers: []Offer{{
-			OfferID: offerIDBinary,
-			Offer:   offer,
-		}},
+		InfoHash:   tc.InfoHash,
+		PeerID:     tc.PeerId,
+		Offers:     offers,
 	}
 
 	data, err := json.Marshal(req)
 	if err != nil {
-		pc.Close()
 		return fmt.Errorf("marshalling request: %w", err)
 	}
 
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
 	err = tc.writeMessage(data)
 	if err != nil {
-		pc.Close()
 		return fmt.Errorf("write AnnounceRequest: %w", err)
 	}
-	if tc.outboundOffers == nil {
-		tc.outboundOffers = make(map[string]outboundOffer)
-	}
-	tc.outboundOffers[offerIDBinary] = outboundOffer{
-		peerConnection: pc,
-		dataChannel:    dc,
-		originalOffer:  offer,
-		infoHash:       tc.InfoHash,
-	}
+
 	return nil
 }
 
@@ -254,7 +231,6 @@ func (tc *TrackerClient) trackerReadLoop(tracker *websocket.Conn) error {
 		if err != nil {
 			return fmt.Errorf("read message error: %w", err)
 		}
-		// tc.Logger.WithDefaultLevel(log.Debug).Printf("received message from tracker: %q", message)
 
 		var ar AnnounceResponse
 		if err := json.Unmarshal(message, &ar); err != nil {
@@ -262,13 +238,13 @@ func (tc *TrackerClient) trackerReadLoop(tracker *websocket.Conn) error {
 			continue
 		}
 
-		if ar.InfoHash != "" && ar.InfoHash != tc.infoHashBinary() {
+		if ar.InfoHash != "" && ar.InfoHash != tc.InfoHash {
 			tc.Logger.Debug("ignoring websocket data from %s for %s (looking for %s: reused socket)",
-				tc.Url, ar.InfoHash, tc.infoHashBinary())
+				tc.Url, ar.InfoHash, tc.InfoHash)
 			continue
 		}
 
-		if ar.PeerID != "" && ar.PeerID == tc.peerIdBinary() {
+		if ar.PeerID != "" && ar.PeerID == tc.PeerId {
 			// ignore offers/answers from this client
 			continue
 		}
@@ -291,8 +267,8 @@ func (tc *TrackerClient) handleOffer(
 	}
 	response := AnnounceResponse{
 		Action:   "announce",
-		InfoHash: tc.infoHashBinary(),
-		PeerID:   tc.peerIdBinary(),
+		InfoHash: tc.InfoHash,
+		PeerID:   tc.PeerId,
 		ToPeerID: peerId,
 		Answer:   &answer,
 		OfferID:  offerId,
@@ -308,7 +284,7 @@ func (tc *TrackerClient) handleOffer(
 		peerConnection.Close()
 		return fmt.Errorf("writing response: %w", err)
 	}
-	timer := time.AfterFunc(30*time.Second, func() {
+	timer := time.AfterFunc(offerTimeOut, func() {
 		metrics.Add("answering peer connections timed out", 1)
 		peerConnection.Close()
 	})
@@ -343,6 +319,7 @@ func (tc *TrackerClient) handleAnswer(offerId string, answer webrtc.SessionDescr
 	// tc.Logger.WithDefaultLevel(log.Debug).Printf("offer %q got answer %v", offerId, answer)
 	metrics.Add("outbound offers answered", 1)
 	err := offer.setAnswer(answer, func(dc datachannel.ReadWriteCloser) {
+		offer.timeout.Stop()
 		metrics.Add("outbound offers answered with datachannel", 1)
 		tc.mu.Lock()
 		tc.stats.ConvertedOutboundConns++
@@ -360,5 +337,6 @@ func (tc *TrackerClient) handleAnswer(offerId string, answer webrtc.SessionDescr
 		tc.Logger.Error("error using outbound offer answer: %v", err)
 		return
 	}
+
 	delete(tc.outboundOffers, offerId)
 }

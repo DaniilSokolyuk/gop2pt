@@ -5,6 +5,7 @@ go 1.18
 require (
 	github.com/frankban/quicktest v1.14.3
 	github.com/gorilla/websocket v1.5.0
+	github.com/mr-tron/base58 v1.2.0
 	github.com/pion/datachannel v1.5.2
 	github.com/pion/logging v0.2.2
 	github.com/pion/webrtc/v3 v3.1.42
