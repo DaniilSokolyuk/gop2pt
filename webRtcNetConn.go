@@ -1,12 +1,13 @@
 package gop2pt
 
 import (
-	"github.com/mr-tron/base58"
 	"net"
 	"time"
 
-	"github.com/DaniilSokolyuk/gop2pt/webtorrent"
+	"github.com/mr-tron/base58"
 	"github.com/pion/datachannel"
+
+	"github.com/DaniilSokolyuk/gop2pt/webtorrent"
 )
 
 const webrtcNetwork = "webrtc"

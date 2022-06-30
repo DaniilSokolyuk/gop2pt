@@ -81,7 +81,7 @@ func (tc *TrackerClient) doWebsocket() error {
 		return fmt.Errorf("dialing tracker: %w", err)
 	}
 	defer c.Close()
-	tc.Logger.Debug("connected")
+	tc.Logger.Debug("connected to tracker: %s", tc.Url)
 	tc.mu.Lock()
 	tc.wsConn = c
 	tc.cond.Broadcast()

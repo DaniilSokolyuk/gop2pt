@@ -1,7 +1,6 @@
 package gop2pt
 
 import (
-	"github.com/pion/datachannel"
 	"log"
 	"net"
 	"net/http"
@@ -10,14 +9,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/pion/datachannel"
+
 	dslog "github.com/DaniilSokolyuk/gop2pt/log"
 	"github.com/DaniilSokolyuk/gop2pt/utils"
 	"github.com/DaniilSokolyuk/gop2pt/webtorrent"
-	"github.com/gorilla/websocket"
 )
 
 var (
-	defaultAnnounceInterval = time.Second * 5
+	defaultAnnounceInterval = time.Second * 50
 	defaultNumWant          = 5
 )
 
@@ -124,6 +125,9 @@ func (p *P2PT) Start() (net.Listener, error) {
 				ReadWriteCloser:    ch,
 				DataChannelContext: dcc,
 			}
+
+			p.logger.Debug("new connection (id: %s, local offered: %t, tracker: %s", conn.RemoteAddr(), dcc.LocalOffered, url)
+
 			listener.onConn <- conn
 		})
 	}

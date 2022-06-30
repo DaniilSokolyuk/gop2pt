@@ -3,10 +3,13 @@ package main
 import (
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/DaniilSokolyuk/gop2pt"
 )
+
+var peers sync.Map
 
 func main() {
 	p2pt := gop2pt.New("p2chatgeneral", []string{"wss://tracker.btorrent.xyz/announce"})
@@ -26,6 +29,11 @@ func main() {
 }
 
 func onConn(conn net.Conn) {
+	if _, loaded := peers.LoadOrStore(conn.RemoteAddr().String(), conn); loaded {
+		conn.Close()
+		return
+	}
+
 	fmt.Println("onConn", conn.RemoteAddr())
 	for {
 		bytes := make([]byte, 16000)
