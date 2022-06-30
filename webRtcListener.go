@@ -5,7 +5,7 @@ import (
 )
 
 type webrtcListener struct {
-	onConn chan webrtcNetConn
+	onConn chan *webrtcNetConn
 	stopCh chan struct{}
 	addr   net.Addr
 }

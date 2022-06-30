@@ -19,7 +19,7 @@ func main() {
 			continue
 		}
 
-		onConn(conn)
+		go onConn(conn)
 	}
 
 	time.Sleep(time.Second * 500)

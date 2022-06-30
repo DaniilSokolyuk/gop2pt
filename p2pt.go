@@ -114,13 +114,13 @@ func New(identifier string, announceURLs []string, opts ...Option) *P2PT {
 func (p *P2PT) Start() (net.Listener, error) {
 	listener := &webrtcListener{
 		addr:   webrtcNetAddr{peerIDBinary: p.peerIDBinary},
-		onConn: make(chan webrtcNetConn),
+		onConn: make(chan *webrtcNetConn),
 		stopCh: make(chan struct{}),
 	}
 
 	for _, url := range p.announceURLs {
 		p.connectTracker(url, func(ch datachannel.ReadWriteCloser, dcc webtorrent.DataChannelContext) {
-			conn := webrtcNetConn{
+			conn := &webrtcNetConn{
 				ReadWriteCloser:    ch,
 				DataChannelContext: dcc,
 			}
